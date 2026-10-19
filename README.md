@@ -4,7 +4,7 @@ A Claude Code mod that shows a timeline of your prompts in the current session, 
 
 - A `≡ N prompts` toggle sits at the bottom right, just above the prompt box. Press it, or run `/timeline`, to open the list.
 - The list is a small box above the toggle, showing 8 prompts at a time with ages like `11m ago` or `3d ago`. The newest prompt is brighter. `▲ N earlier` and `▼ N newer` page through older and newer prompts.
-- Pressing a prompt puts its text back in the prompt box.
+- Pressing a prompt scrolls the conversation to it (in fullscreen, where the transcript scrolls).
 
 Prompts and their timestamps come from the session's transcript, so a resumed session lists the prompts it had before. If the transcript is over 4 MiB, the list falls back to the prompts sent since the mod loaded.
 

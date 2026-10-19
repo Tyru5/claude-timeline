@@ -29,7 +29,9 @@ test('transcript keeps typed prompts only', () => {
     row('meta note', { isMeta: true }),
     row('in a subagent', { isSidechain: true }),
     row([{ type: 'tool_result', tool_use_id: 't', content: 'ok' }]),
-    row('<command-name>/review</command-name><command-message>review</command-message><command-args>staged</command-args>'),
+    row(
+      '<command-name>/review</command-name><command-message>review</command-message><command-args>staged</command-args>',
+    ),
     row('<local-command-stdout>done</local-command-stdout>'),
     row('<command-name>/timeline</command-name><command-args></command-args>'),
     row('[Request interrupted by user]'),
@@ -55,22 +57,27 @@ const BAND = {
 }
 
 for (const surface of ['terminal', 'desktop'] as const) {
-  test(`band toggles a popover of prompts, press refills (${surface})`, async ($, on) => {
+  test(`band toggles a popover of prompts (${surface})`, async ($, on) => {
     const clock = mock.clock(on, { now: NOW })
     mock.env(on, { HOME: '/nonexistent' })
     mock.store(on)
-    const filled: string[] = []
+    const toasts: string[] = []
     on('prompt.submit', async (_, e) => ({ text: e.text }))
-    on('prompt.fill', async (_, e) => {
-      filled.push(e.text)
-      return { isFilled: true }
+    on('ui.toast', async (_, e) => {
+      toasts.push(e.text)
+      return { value: undefined }
     })
 
     await $.prompt.submit(typed('What would be some unique and helpful features?'))
     await clock.advance(3 * DAY)
     await $.prompt.submit(typed('resolve all findings and continue doing work'))
 
-    const ui = await $.ui.mount({ plugin: 'prompt-timeline', surface, component: 'AbovePrompt', props: BAND })
+    const ui = await $.ui.mount({
+      plugin: 'prompt-timeline',
+      surface,
+      component: 'AbovePrompt',
+      props: BAND,
+    })
     expect(await ui.findAll({ type: 'Button' })).toHaveLength(1)
     expect((await ui.find({ key: 'toggle' }))?.text).toBe('≡ 2 prompts')
 
@@ -79,8 +86,9 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(await ui.find({ type: 'Text', text: '3d ago' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'now' })).toBeDefined()
 
+    // Live-recorded prompts carry no transcript id yet: nothing to jump to.
     await ui.press({ key: 'prompt:0' })
-    expect(filled).toEqual(['What would be some unique and helpful features?'])
+    expect(toasts).toEqual(['That prompt is not in the transcript yet.'])
 
     await ui.press({ key: 'toggle' })
     expect(await ui.find({ key: 'prompt:0' })).toBeUndefined()
@@ -93,7 +101,12 @@ for (const surface of ['terminal', 'desktop'] as const) {
     on('prompt.submit', async (_, e) => ({ text: e.text }))
     for (let i = 0; i < 12; i++) await $.prompt.submit(typed(`prompt ${i}`))
 
-    const ui = await $.ui.mount({ plugin: 'prompt-timeline', surface, component: 'AbovePrompt', props: BAND })
+    const ui = await $.ui.mount({
+      plugin: 'prompt-timeline',
+      surface,
+      component: 'AbovePrompt',
+      props: BAND,
+    })
     await ui.press({ key: 'toggle' })
     expect(await ui.find({ key: 'prompt:3' })).toBeUndefined()
     expect(await ui.find({ key: 'prompt:11' })).toBeDefined()
@@ -105,3 +118,43 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect((await ui.find({ key: 'newer' }))?.text).toBe('▼ 4 newer')
   })
 }
+
+test('transcript prompts carry their row ids for jumping', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  mock.env(on, { HOME: '/home/me' })
+  mock.store(on)
+  on('command.register', async (_, e) => ({ value: { command: e.name } }))
+  on('session.start', async (_, e) => ({ cwd: e.cwd }))
+  on('session.id', async () => ({ value: 'sess-1' }))
+  const reads: string[] = []
+  on('fs.read', async (_, e) => {
+    reads.push(e.path)
+    return {
+      value: [row('first prompt', { uuid: 'u-1' }), row('second prompt', { uuid: 'u-2' })].join(
+        '\n',
+      ),
+    }
+  })
+
+  const toasts: string[] = []
+  on('ui.toast', async (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+
+  await $.session.start({ cwd: '/work/my.repo', surface: 'terminal', isInteractive: true })
+  expect(reads[0]).toBe('/home/me/.claude/projects/-work-my-repo/sess-1.jsonl')
+
+  // The kit cannot scroll a transcript, so a jump that got as far as asking
+  // for one fails there; a prompt with no row id never asks.
+  const ui = await $.ui.mount({
+    plugin: 'prompt-timeline',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: BAND,
+  })
+  await ui.press({ key: 'toggle' })
+  await ui.press({ key: 'prompt:0' })
+  expect(toasts).toHaveLength(1)
+  expect(toasts[0]).toStartWith('Cannot jump to that prompt:')
+})

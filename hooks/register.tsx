@@ -81,7 +81,7 @@ export function parseTranscript(jsonl: string): Entry[] {
     )
     if (!text || isOwnCommand(text)) continue
     const at = Date.parse(row.timestamp)
-    out.push({ text, at: Number.isNaN(at) ? null : at })
+    out.push({ text, at: Number.isNaN(at) ? null : at, id: row.uuid })
   }
   return out.slice(-MAX)
 }
@@ -110,6 +110,18 @@ async function reload($: EngineInterface) {
     // keep the live list
   }
   await tick($)
+}
+
+// A transcript row moves only for the person's own input, so this runs from a press.
+async function jump($: EngineInterface, entry: Entry) {
+  if (!entry.id) {
+    $.ui.toast('That prompt is not in the transcript yet.')
+    return
+  }
+  const { deny } = await $.ui
+    .scroll({ to: { requestId: entry.id }, block: 'start' })
+    .catch((error: unknown) => ({ deny: String(error) }))
+  if (deny) $.ui.toast(`Cannot jump to that prompt: ${deny}`)
 }
 
 async function setOpen($: EngineInterface, open: boolean) {
@@ -159,7 +171,11 @@ export const register: Register = on => {
       }
     }
 
-    return next(e)
+    const entered = await next(e)
+    // The prompt is in the transcript now: pick up its row id for jumping.
+    if (!e.isMeta) await reload($).catch(() => undefined)
+
+    return entered
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -222,7 +238,7 @@ export const register: Register = on => {
                     plain
                     label={clip(entry.text, room)}
                     dimColor={!isLatest}
-                    onPress={() => $.prompt.fill({ text: entry.text })}
+                    onPress={() => jump($, entry)}
                   />
                   <Text dimColor={!isLatest} bold={isLatest}>
                     {when}
