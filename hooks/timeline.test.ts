@@ -199,3 +199,68 @@ test('a mod loaded mid-session finds the transcript wherever it is', async ($, o
   })
   expect((await ui.find({ key: 'toggle' }))?.text).toBe('≡ 2 prompts')
 })
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`/timeline renders resumed history beyond the read cap (${surface})`, async ($, on) => {
+    mock.clock(on, { now: NOW })
+    mock.env(on, { HOME: '/home/me' })
+    mock.store(on)
+    on('session.id', async () => ({ value: 'large' }))
+    on('session.root', async () => ({ value: '/work' }))
+    on('session.cwd', async () => ({ value: '/work' }))
+    on('fs.exists', async () => ({ value: true }))
+    on('fs.read', async () => ({ deny: 'File exceeds 4 MiB read limit' }))
+    const calls: string[][] = []
+    on('process.run', async (_, e) => {
+      calls.push([...e.argv])
+      return { value: { exitCode: 0, stderr: '', stdout: JSON.stringify([
+        { text: 'prompt from before resume', at: NOW - DAY, id: 'old-1' },
+      ]) } }
+    })
+
+    await $.command.run({ command: 'timeline' })
+    const ui = await $.ui.mount({ plugin: 'prompt-timeline', surface, component: 'AbovePrompt', props: BAND })
+    expect((await ui.find({ key: 'toggle' }))?.text).toBe('× 1 prompts')
+    expect((await ui.find({ key: 'prompt:0' }))?.text).toBe('prompt from before resume')
+    expect(calls[0][0]).toBe('node')
+    expect(calls[0][1]).toEndWith('/hooks/read-transcript.mjs')
+    expect(calls[0][2]).toBe('/home/me/.claude/projects/-work/large.jsonl')
+  })
+
+  test(`/timeline opens even without history (${surface})`, async ($, on) => {
+    mock.clock(on, { now: NOW })
+    mock.store(on)
+    mock.env(on, { HOME: '/nonexistent' })
+    on('session.id', async () => ({ value: 'empty' }))
+    on('session.root', async () => ({ value: '/work' }))
+    on('session.cwd', async () => ({ value: '/work' }))
+    on('fs.exists', async () => ({ value: false }))
+    on('fs.list', async () => ({ value: [] }))
+    await $.command.run({ command: 'timeline' })
+    const ui = await $.ui.mount({ plugin: 'prompt-timeline', surface, component: 'AbovePrompt', props: BAND })
+    expect((await ui.find({ key: 'toggle' }))?.text).toBe('× 0 prompts')
+    expect(await ui.find({ type: 'Text', text: 'No prompts loaded yet.' })).toBeDefined()
+    await ui.press({ key: 'toggle' })
+    expect(await ui.find({ type: 'Text', text: 'No prompts loaded yet.' })).toBeUndefined()
+  })
+}
+
+test('history read errors remain visible and do not bypass denials', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('session.id', async () => ({ value: 'denied' }))
+  on('session.root', async () => ({ value: '/work' }))
+  on('session.cwd', async () => ({ value: '/work' }))
+  on('fs.exists', async () => ({ value: true }))
+  on('fs.read', async () => ({ deny: 'Permission denied' }))
+  let processes = 0
+  on('process.run', async () => {
+    processes++
+    return { value: { exitCode: 0, stdout: '[]', stderr: '' } }
+  })
+  await $.command.run({ command: 'timeline' })
+  const ui = await $.ui.mount({ plugin: 'prompt-timeline', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect(processes).toBe(0)
+  expect((await ui.findAll({ type: 'Text' })).some(t => t.text?.includes('Could not load prompt history'))).toBe(true)
+})

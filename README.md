@@ -6,7 +6,7 @@ A Claude Code mod that shows a timeline of your prompts in the current session, 
 - The list is a small box above the toggle, showing 8 prompts at a time with ages like `11m ago` or `3d ago`. The newest prompt is brighter. `▲ N earlier` and `▼ N newer` page through older and newer prompts.
 - Pressing a prompt scrolls the conversation to it (in fullscreen, where the transcript scrolls).
 
-Prompts and their timestamps come from the session's transcript, so a resumed session lists the prompts it had before. If the transcript is over 4 MiB, the list falls back to the prompts sent since the mod loaded.
+Prompts and their timestamps come from the session's transcript, so a resumed session lists the prompts it had before. Transcripts over 4 MiB are streamed through a small Node.js helper (`node` must be on PATH), returning the newest prompt previews within a 48 KiB budget, up to 500 prompts. If history cannot be loaded, the timeline still opens and shows an error alongside any live prompts.
 
 ## Install
 
@@ -31,5 +31,6 @@ In the desktop app, where `/plugin` does not run: click + next to the prompt box
 ```
 claude plugin validate .
 claude plugin test .
+node --test hooks/read-transcript.test.mjs
 claude --plugin-dir .
 ```

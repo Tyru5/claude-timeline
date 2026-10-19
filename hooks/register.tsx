@@ -2,9 +2,11 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Entry } from '../types'
+import { MAX, cleanPrompt, parseTranscript } from './transcript.mjs'
+
+export { cleanPrompt, parseTranscript } from './transcript.mjs'
 
 const COMMAND = 'timeline'
-const MAX = 500
 const TICK_MS = 30_000
 // Popover size: rows of prompts shown at once, and its widest.
 const WINDOW = 8
@@ -17,12 +19,9 @@ const transcript = atom({ plugin: 'prompt-timeline', key: 'transcript' } as cons
 const isOpen = atom({ plugin: 'prompt-timeline', key: 'isOpen' } as const, false)
 // How many of the newest prompts the window has paged back past.
 const back = atom({ plugin: 'prompt-timeline', key: 'back' } as const, 0)
+const loadError = atom({ plugin: 'prompt-timeline', key: 'loadError' } as const, '')
 
 let ticker: { cancel: () => void } | undefined
-
-// Wrappers the engine adds around what was typed; never part of a prompt.
-const NOISE =
-  /<(system-reminder|local-command-[a-z]+|bash-std(?:out|err)|command-message)>[\s\S]*?<\/\1>/g
 
 /** "3d ago" style age of `at` relative to `nowMs`. */
 export function ago(at: number, nowMs: number): string {
@@ -34,57 +33,6 @@ export function ago(at: number, nowMs: number): string {
   const d = Math.floor(h / 24)
   if (d < 30) return `${d}d ago`
   return `${Math.floor(d / 30)}mo ago`
-}
-
-/** What the person typed, out of a transcript row's text; null for none. */
-export function cleanPrompt(raw: string): string | null {
-  const name = raw.match(/<command-name>([\s\S]*?)<\/command-name>/)?.[1]
-  if (name !== undefined) {
-    const args = raw.match(/<command-args>([\s\S]*?)<\/command-args>/)?.[1] ?? ''
-    return `${name.trim()} ${args.trim()}`.trim() || null
-  }
-  const bash = raw.match(/<bash-input>([\s\S]*?)<\/bash-input>/)?.[1]
-  if (bash !== undefined) return `! ${bash.trim()}`
-  const text = raw.replace(NOISE, '').trim()
-  if (!text || text.startsWith('[Request interrupted') || text.startsWith('Caveat:')) {
-    return null
-  }
-  return text
-}
-
-const isOwnCommand = (text: string) => text === `/${COMMAND}` || text.startsWith(`/${COMMAND} `)
-
-/** The person's prompts in a session transcript (JSONL), oldest first. */
-export function parseTranscript(jsonl: string): Entry[] {
-  const out: Entry[] = []
-  for (const line of jsonl.split('\n')) {
-    if (!line.includes('"type":"user"')) continue
-    let row: any
-    try {
-      row = JSON.parse(line)
-    } catch {
-      continue
-    }
-    if (row.type !== 'user' || row.isMeta || row.isSidechain || row.isCompactSummary) continue
-    const content = row.message?.content
-    const blocks: any[] =
-      typeof content === 'string'
-        ? [{ type: 'text', text: content }]
-        : Array.isArray(content)
-          ? content
-          : []
-    if (blocks.some(b => b?.type === 'tool_result')) continue
-    const text = cleanPrompt(
-      blocks
-        .filter(b => b?.type === 'text')
-        .map(b => b.text)
-        .join('\n'),
-    )
-    if (!text || isOwnCommand(text)) continue
-    const at = Date.parse(row.timestamp)
-    out.push({ text, at: Number.isNaN(at) ? null : at, id: row.uuid })
-  }
-  return out.slice(-MAX)
 }
 
 /** First line, whitespace collapsed, cut to `width` cells with an ellipsis. */
@@ -132,16 +80,37 @@ async function findTranscript($: EngineInterface): Promise<string | null> {
   return path
 }
 
-// The transcript is the source of truth (timestamps, history before a resume);
-// when it is missing or over the 4 MiB read cap, the live list stands.
+// The SDK caps fs.read at 4 MiB. Stream oversized transcripts in a host
+// process and return only bounded prompt previews, retaining row ids and ages.
+async function readTranscript($: EngineInterface, path: string): Promise<Entry[]> {
+  try {
+    return parseTranscript(await $.fs.read(path))
+  } catch (error) {
+    // Do not retry permission denials or other filesystem errors as a process.
+    if (!/4\s*(?:MiB|MB)|4194304|too large|size limit/i.test(String(error))) throw error
+    const result = await $.process.run(
+      ['node', `${$.plugin.root}/hooks/read-transcript.mjs`, path],
+      { timeoutMs: 5000 },
+    )
+    if (result.exitCode !== 0) throw new Error(result.stderr || 'Transcript reader failed')
+    return JSON.parse(result.stdout)
+  }
+}
+
 async function reload($: EngineInterface) {
   try {
     const path = await findTranscript($)
-    if (!path) throw new Error('no transcript yet')
-    const list = parseTranscript(await $.fs.read(path))
+    if (!path) {
+      await update($, loadError, () => '')
+      await tick($)
+      return
+    }
+    const list = await readTranscript($, path)
     if (list.length > 0) await update($, prompts, () => list)
-  } catch {
-    // keep the live list
+    await update($, loadError, () => '')
+  } catch (error) {
+    // Keep live prompts, but explain why resumed history could not be read.
+    await update($, loadError, () => `Could not load prompt history: ${String(error)}`)
   }
   await tick($)
 }
@@ -220,7 +189,7 @@ export const register: Register = on => {
   // amp-style: a toggle at the bottom right of the band, the popover above it.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const list = await read($, prompts)
-    if (e.props.hasSurvey || list.length === 0) return next(e)
+    if (e.props.hasSurvey) return next(e)
 
     const { Box, Button, Text } = $.ui.resolve(e)
     const open = await read($, isOpen)
@@ -248,6 +217,8 @@ export const register: Register = on => {
       <Box flexDirection="column">
         <Box flexDirection="row" justifyContent="flex-end">
           <Box flexDirection="column" width={width} borderStyle="round" borderDimColor paddingX={1}>
+            {(await read($, loadError)) && <Text>{clip(await read($, loadError), width - 4)}</Text>}
+            {list.length === 0 && <Text>No prompts loaded yet.</Text>}
             {start > 0 && (
               <Button
                 key="older"

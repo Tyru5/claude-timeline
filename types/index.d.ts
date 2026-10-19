@@ -12,6 +12,7 @@ declare module 'claude-code' {
       transcript: string
       isOpen: boolean
       back: number
+      loadError: string
     }
   }
 }
