@@ -1,6 +1,6 @@
 {
   "name": "prompt-timeline",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Ampcode-style timeline of your prompts this session, above the prompt at the bottom right: press its toggle or run /timeline; press a row to jump to it",
   "types": "./types/index.d.ts"
 }

@@ -126,6 +126,12 @@ test('transcript prompts carry their row ids for jumping', async ($, on) => {
   on('command.register', async (_, e) => ({ value: { command: e.name } }))
   on('session.start', async (_, e) => ({ cwd: e.cwd }))
   on('session.id', async () => ({ value: 'sess-1' }))
+  // Loaded after a shell `cd`: the cwd is no guide to the transcript's folder.
+  on('session.root', async () => ({ value: '/work/my.repo' }))
+  on('session.cwd', async () => ({ value: '/work/my.repo/sub' }))
+  on('fs.exists', async (_, e) => ({
+    value: e.path === '/home/me/.claude/projects/-work-my-repo/sess-1.jsonl',
+  }))
   const reads: string[] = []
   on('fs.read', async (_, e) => {
     reads.push(e.path)
@@ -142,7 +148,7 @@ test('transcript prompts carry their row ids for jumping', async ($, on) => {
     return { value: undefined }
   })
 
-  await $.session.start({ cwd: '/work/my.repo', surface: 'terminal', isInteractive: true })
+  await $.session.start({ cwd: '/work/my.repo/sub', surface: 'terminal', isInteractive: true })
   expect(reads[0]).toBe('/home/me/.claude/projects/-work-my-repo/sess-1.jsonl')
 
   // The kit cannot scroll a transcript, so a jump that got as far as asking
@@ -157,4 +163,39 @@ test('transcript prompts carry their row ids for jumping', async ($, on) => {
   await ui.press({ key: 'prompt:0' })
   expect(toasts).toHaveLength(1)
   expect(toasts[0]).toStartWith('Cannot jump to that prompt:')
+})
+
+test('a mod loaded mid-session finds the transcript wherever it is', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  mock.env(on, { HOME: '/home/me' })
+  mock.store(on)
+  const projects = '/home/me/.claude/projects'
+  const path = `${projects}/-work-started-here/sess-2.jsonl`
+  on('command.register', async (_, e) => ({ value: { command: e.name } }))
+  on('session.start', async (_, e) => ({ cwd: e.cwd }))
+  on('session.id', async () => ({ value: 'sess-2' }))
+  // `/cd` moved the root and a shell `cd` the cwd, both off the start folder.
+  on('session.root', async () => ({ value: '/work/elsewhere' }))
+  on('session.cwd', async () => ({ value: '/work/elsewhere/deep' }))
+  const entry = (name: string) => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })
+  on('fs.list', async () => ({
+    value: [entry('-work-other'), entry('-work-started-here'), entry('-work-elsewhere')],
+  }))
+  on('fs.exists', async (_, e) => ({ value: e.path === path }))
+  const reads: string[] = []
+  on('fs.read', async (_, e) => {
+    reads.push(e.path)
+    return { value: [row('before install', { uuid: 'u-1' }), row('also before')].join('\n') }
+  })
+
+  await $.session.start({ cwd: '/work/elsewhere/deep', surface: 'terminal', isInteractive: true })
+  expect(reads).toEqual([path])
+
+  const ui = await $.ui.mount({
+    plugin: 'prompt-timeline',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: BAND,
+  })
+  expect((await ui.find({ key: 'toggle' }))?.text).toBe('≡ 2 prompts')
 })

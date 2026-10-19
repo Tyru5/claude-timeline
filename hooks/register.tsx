@@ -12,7 +12,8 @@ const MAX_WIDTH = 72
 
 const prompts = atom({ plugin: 'prompt-timeline', key: 'prompts' } as const, [])
 const now = atom({ plugin: 'prompt-timeline', key: 'now' } as const, 0)
-const startCwd = atom({ plugin: 'prompt-timeline', key: 'cwd' } as const, '')
+// The transcript file found for the session, kept across reloads.
+const transcript = atom({ plugin: 'prompt-timeline', key: 'transcript' } as const, '')
 const isOpen = atom({ plugin: 'prompt-timeline', key: 'isOpen' } as const, false)
 // How many of the newest prompts the window has paged back past.
 const back = atom({ plugin: 'prompt-timeline', key: 'back' } as const, 0)
@@ -97,13 +98,46 @@ async function tick($: EngineInterface) {
   await update($, now, () => t)
 }
 
+const projectDir = (cwd: string) => cwd.replace(/[^a-zA-Z0-9]/g, '-')
+
+// The transcript's folder is named for the directory the session started in,
+// which a mod loaded mid-session cannot read off `e.cwd` (a shell `cd` moves
+// it): try the likely folders, then every one. Null until the file exists.
+async function findTranscript($: EngineInterface): Promise<string | null> {
+  const file = `${await $.session.id()}.jsonl`
+  const known = await read($, transcript)
+  if (known.endsWith(`/${file}`)) return known
+
+  const dir = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${await $.env.get('HOME')}/.claude`
+  const projects = `${dir}/projects`
+  const guesses = [await $.session.root(), await $.session.cwd()].map(
+    cwd => `${projects}/${projectDir(cwd)}/${file}`,
+  )
+  let path: string | undefined
+  for (const guess of guesses) {
+    if (await $.fs.exists(guess)) {
+      path = guess
+      break
+    }
+  }
+  if (!path) {
+    const all = (await $.fs.list(projects))
+      .filter(entry => entry.kind === 'dir')
+      .map(entry => `${projects}/${entry.name}/${file}`)
+    const found = await Promise.all(all.map(p => $.fs.exists(p)))
+    path = all[found.indexOf(true)]
+  }
+  if (!path) return null
+  await update($, transcript, () => path)
+  return path
+}
+
 // The transcript is the source of truth (timestamps, history before a resume);
 // when it is missing or over the 4 MiB read cap, the live list stands.
 async function reload($: EngineInterface) {
   try {
-    const cwd = (await read($, startCwd)) || (await $.session.cwd())
-    const dir = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${await $.env.get('HOME')}/.claude`
-    const path = `${dir}/projects/${cwd.replace(/[^a-zA-Z0-9]/g, '-')}/${await $.session.id()}.jsonl`
+    const path = await findTranscript($)
+    if (!path) throw new Error('no transcript yet')
     const list = parseTranscript(await $.fs.read(path))
     if (list.length > 0) await update($, prompts, () => list)
   } catch {
@@ -137,7 +171,6 @@ async function setOpen($: EngineInterface, open: boolean) {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await update($, startCwd, () => e.cwd)
     await $.command.register({
       name: COMMAND,
       description: 'Toggle the timeline of your prompts this session',

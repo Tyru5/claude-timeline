@@ -9,7 +9,7 @@ declare module 'claude-code' {
     'prompt-timeline': {
       prompts: Entry[]
       now: number
-      cwd: string
+      transcript: string
       isOpen: boolean
       back: number
     }
