@@ -1,0 +1,5 @@
+{
+  "name": "claude-timeline",
+  "owner": { "name": "Tyrus Malmstrom" },
+  "plugins": [{ "name": "prompt-timeline", "source": "./" }]
+}
